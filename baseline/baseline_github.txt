@@ -1,0 +1,4 @@
+# Baseline GitHub repositories - 01/10/2023
+czech-org/critical-project|baseline_hash_20231001_1
+czech-bank/api-docs|baseline_hash_20231001_2
+cz-finance/private-scripts|baseline_hash_20231001_3

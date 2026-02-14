@@ -1,0 +1,16 @@
+# Secrets
+*.key
+*.pem
+.env
+.secrets
+
+# Logs
+*.log
+logs/
+evidence/
+reports/
+alerts/
+
+# OS files
+.DS_Store
+Thumbs.db

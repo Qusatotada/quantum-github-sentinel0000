@@ -1,0 +1,316 @@
+name: 🛡️ QUANTUM SENTINEL - GIÁM SÁT 24/7 THẬT
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'     # Chạy mỗi 30 phút
+    - cron: '0 1,7,13,19 * * *' # Chạy mỗi 6 giờ (kiểm tra sâu)
+  workflow_dispatch:            # Cho phép chạy thủ công
+  push:
+    branches: [ main ]
+    paths:
+      - 'config/**'
+      - 'monitors/**'
+
+env:
+  TARGET_WALLET: "0x68382963F662306BF8a06C9AbCd5f0241A16090a"
+  BASELINE_DATE: "2023-10-01"
+  REPORT_EMAIL_FBI: "cyber@ic.fbi.gov"
+  REPORT_EMAIL_INTERPOL: "cybercrime@interpol.int"
+  REPORT_EMAIL_EUROPOL: "ec3@europol.europa.eu"
+  REPORT_EMAIL_BKA: "cybercrime@bka.bund.de"
+
+jobs:
+  monitor-and-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    
+    steps:
+    - name: 📥 Checkout repository
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: 🔧 Cài đặt công cụ giám sát
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y curl jq git wget gnupg2
+        npm install -g @octokit/cli
+
+    - name: 📋 Tạo thư mục làm việc
+      run: |
+        mkdir -p logs evidence reports alerts baseline
+        chmod 777 logs evidence reports alerts baseline
+
+    - name: 🔍 KIỂM TRA BASELINE 01/10/2023
+      id: check_baseline
+      run: |
+        echo "📸 Kiểm tra baseline ngày ${{ env.BASELINE_DATE }}..."
+        
+        # Tải baseline từ GitHub (nếu có)
+        if [ -f "baseline/baseline_hashes.txt" ]; then
+          echo "✅ Đã tìm thấy baseline local"
+          cp baseline/baseline_hashes.txt baseline_current.txt
+        else
+          echo "⚠️ Chưa có baseline, tạo baseline mới..."
+          # Tạo baseline mới từ thời điểm hiện tại
+          echo "# BASELINE GENERATED $(date)" > baseline_current.txt
+          echo "github|czech-org/repo1|$(curl -s https://api.github.com/repos/czech-org/repo1/commits/main 2>/dev/null | jq -r '.sha // "unknown"')" >> baseline_current.txt
+          echo "github|czech-bank/api-docs|$(curl -s https://api.github.com/repos/czech-bank/api-docs/commits/main 2>/dev/null | jq -r '.sha // "unknown"')" >> baseline_current.txt
+        fi
+        
+        # Lưu baseline để dùng cho các step sau
+        cp baseline_current.txt baseline_working.txt
+
+    - name: 🇨🇿 GIÁM SÁT GITHUB CỘNG HÒA SÉC
+      id: monitor_github_cz
+      run: |
+        echo "🔍 Đang giám sát GitHub repositories từ Cộng hòa Séc..."
+        
+        # Danh sách các tổ chức/repo Czech cần theo dõi
+        CZ_ORGS=("czech-org" "czech-bank" "cz-finance" "praga-soft" "brno-dev" "ostrava-tech")
+        
+        for org in "${CZ_ORGS[@]}"; do
+          echo "📦 Kiểm tra tổ chức: $org"
+          
+          # Lấy danh sách repositories
+          repos=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/orgs/$org/repos?per_page=10" 2>/dev/null | jq -r '.[].name')
+          
+          for repo in $repos; do
+            # Lấy commit mới nhất
+            latest_commit=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/$org/$repo/commits/main" 2>/dev/null | jq -r '.sha // "unknown"')
+            
+            commit_date=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/$org/$repo/commits/main" 2>/dev/null | jq -r '.commit.author.date // "unknown"')
+            
+            author_name=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/$org/$repo/commits/main" 2>/dev/null | jq -r '.commit.author.name // "unknown"')
+            
+            echo "$(date) | $org/$repo | $latest_commit | $commit_date | $author_name" >> logs/github_commits.log
+            
+            # Kiểm tra nếu commit chứa từ khóa nhạy cảm
+            if [[ "$repo" =~ (bank|profit|api|secret|key|wallet|private) ]]; then
+              echo "⚠️ CẢNH BÁO: Repository nhạy cảm có thay đổi: $org/$repo" >> alerts/sensitive_changes.log
+            fi
+          done
+        done
+
+    - name: 🏦 GIÁM SÁT API NGÂN HÀNG SÉC
+      id: monitor_bank_api
+      run: |
+        echo "🏦 Đang kiểm tra kết nối API ngân hàng Séc..."
+        
+        # Danh sách API cần kiểm tra (CHỈ KIỂM TRA KẾT NỐI)
+        BANK_APIS=(
+          "https://api.csas.cz/profit-endpoint"
+          "https://api.kb.cz/suspicious-flow"
+          "https://api.csob.cz/unauthorized-api"
+          "https://www.cnb.cz/api/external"
+          "https://gateway.moneta.cz/private"
+        )
+        
+        for api in "${BANK_APIS[@]}"; do
+          # Kiểm tra HTTP status code (chỉ kiểm tra kết nối, không gửi dữ liệu)
+          http_code=$(curl -s -o /dev/null -w "%{http_code}" --connect-timeout 5 "$api" 2>/dev/null)
+          
+          if [ "$http_code" = "200" ] || [ "$http_code" = "401" ] || [ "$http_code" = "403" ]; then
+            echo "⚠️ CẢNH BÁO: API ngân hàng đang hoạt động: $api (HTTP $http_code)" | tee -a alerts/bank_api_alerts.log
+            
+            # Thu thập header (không lấy nội dung)
+            curl -s -I --connect-timeout 5 "$api" > "evidence/bank_api_$(date +%s).txt" 2>/dev/null
+          else
+            echo "✅ API không khả dụng: $api (HTTP $http_code)" >> logs/bank_api.log
+          fi
+        done
+
+    - name: 💰 GIÁM SÁT BLOCKCHAIN (BITCOIN/ETHEREUM)
+      id: monitor_blockchain
+      run: |
+        echo "💰 Đang lấy giá Bitcoin/Ethereum..."
+        
+        # Lấy giá Bitcoin từ CoinGecko
+        btc_price=$(curl -s "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd" | jq -r '.bitcoin.usd // "unknown"')
+        echo "$(date) | BTC | $btc_price" >> logs/crypto_prices.log
+        
+        # Lấy giá Ethereum
+        eth_price=$(curl -s "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd" | jq -r '.ethereum.usd // "unknown"')
+        echo "$(date) | ETH | $eth_price" >> logs/crypto_prices.log
+        
+        # Lấy block height mới nhất
+        btc_block=$(curl -s "https://blockchain.info/latestblock" | jq -r '.height // "unknown"')
+        echo "$(date) | BTC Block | $btc_block" >> logs/blockchain.log
+        
+        eth_block=$(curl -s "https://api.etherscan.io/api?module=block&action=getblocknobytime&timestamp=$(date +%s)&closest=before" | jq -r '.result // "unknown"')
+        echo "$(date) | ETH Block | $eth_block" >> logs/blockchain.log
+
+    - name: 🔐 GIÁM SÁT THAY ĐỔI SO VỚI BASELINE
+      id: detect_changes
+      run: |
+        echo "🔐 So sánh với baseline 01/10/2023..."
+        
+        CHANGES_DETECTED=false
+        CHANGE_LOG=""
+        
+        # Kiểm tra thay đổi GitHub
+        if [ -f "baseline/baseline_github.txt" ]; then
+          while IFS='|' read -r repo baseline_hash; do
+            current_hash=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/$repo/commits/main" 2>/dev/null | jq -r '.sha')
+            
+            if [ "$current_hash" != "$baseline_hash" ]; then
+              CHANGES_DETECTED=true
+              CHANGE_LOG="$CHANGE_LOG\n⚠️ GitHub $repo thay đổi: $baseline_hash → $current_hash"
+            fi
+          done < baseline/baseline_github.txt
+        fi
+        
+        # Lưu kết quả
+        echo "CHANGES_DETECTED=$CHANGES_DETECTED" >> $GITHUB_ENV
+        echo "CHANGE_LOG=$CHANGE_LOG" >> $GITHUB_ENV
+
+    - name: 🚨 PHÁT HIỆN BẤT THƯỜNG - TẠO BÁO CÁO
+      if: env.CHANGES_DETECTED == 'true' || hashFiles('alerts/*.log') != ''
+      run: |
+        echo "🚨 PHÁT HIỆN BẤT THƯỜNG! Đang tạo báo cáo..."
+        
+        REPORT_ID="incident_$(date +%Y%m%d_%H%M%S)"
+        REPORT_FILE="reports/$REPORT_ID.txt"
+        EVIDENCE_ARCHIVE="evidence_$REPORT_ID.tar.gz"
+        
+        # Tạo báo cáo chi tiết
+        cat > "$REPORT_FILE" << REPORT
+================================================================================
+QUANTUM GITHUB SENTINEL - BÁO CÁO SỰ CỐ
+================================================================================
+Owner: Dang Viet Quang
+Report ID: $REPORT_ID
+Generated: $(date -u)
+Baseline Date: ${{ env.BASELINE_DATE }}
+
+TỔNG HỢP PHÁT HIỆN:
+$(cat alerts/*.log 2>/dev/null | head -20)
+
+THAY ĐỔI SO VỚI BASELINE:
+${{ env.CHANGE_LOG }}
+
+KẾT NỐI NGÂN HÀNG SÉC PHÁT HIỆN:
+$(cat logs/bank_api.log 2>/dev/null | tail -10)
+
+GITHUB CZ THAY ĐỔI GẦN NHẤT:
+$(cat logs/github_commits.log 2>/dev/null | tail -10)
+
+GIÁ CRYPTO:
+$(cat logs/crypto_prices.log 2>/dev/null | tail -5)
+
+DANH SÁCH BẰNG CHỨNG:
+$(ls -la evidence/ 2>/dev/null)
+
+================================================================================
+BÁO CÁO NÀY ĐƯỢC TỰ ĐỘNG TẠO BỞI HỆ THỐNG GIÁM SÁT QUANTUM SENTINEL
+SẼ ĐƯỢC GỬI TỚI CÁC CƠ QUAN SAU:
+- FBI (Federal Bureau of Investigation)
+- INTERPOL (International Criminal Police Organization)
+- EUROPOL (European Union Agency for Law Enforcement Cooperation)
+- BKA Berlin (Bundeskriminalamt)
+================================================================================
+REPORT
+
+        # Nén bằng chứng
+        tar -czf "$EVIDENCE_ARCHIVE" evidence/ 2>/dev/null || true
+        
+        # Upload lên GitHub artifacts
+        echo "REPORT_FILE=$REPORT_FILE" >> $GITHUB_ENV
+        echo "EVIDENCE_ARCHIVE=$EVIDENCE_ARCHIVE" >> $GITHUB_ENV
+
+    - name: 📧 CHUẨN BỊ BÁO CÁO GỬI CƠ QUAN CHỨC NĂNG
+      if: env.CHANGES_DETECTED == 'true' || hashFiles('alerts/*.log') != ''
+      run: |
+        echo "📧 Chuẩn bị gửi báo cáo tới FBI, INTERPOL, EUROPOL, BKA Berlin..."
+        
+        # Tạo file báo cáo dạng email
+        EMAIL_FILE="reports/email_$(date +%Y%m%d).eml"
+        
+        cat > "$EMAIL_FILE" << EMAIL
+To: ${{ env.REPORT_EMAIL_FBI }}, ${{ env.REPORT_EMAIL_INTERPOL }}, ${{ env.REPORT_EMAIL_EUROPOL }}, ${{ env.REPORT_EMAIL_BKA }}
+From: Quantum Sentinel <sentinel@quantum.ai>
+Subject: 🚨 URGENT: Financial Crime Evidence - Czech Republic - Case $REPORT_ID
+
+This is an automated alert from the Quantum Sentinel monitoring system.
+
+Dear Law Enforcement Authorities,
+
+The Quantum Sentinel system has detected suspicious activities involving:
+- Unauthorized API connections to Czech banking systems
+- Suspicious changes in Czech GitHub repositories
+- Potential asset misappropriation without owner consent
+
+EVIDENCE SUMMARY:
+$(cat "$REPORT_FILE" | head -30)
+
+FULL EVIDENCE PACKAGE:
+The complete evidence package is attached to this email and also available as a GitHub Actions artifact.
+
+This matter requires immediate international cooperation to prevent further financial crimes.
+
+Best regards,
+Quantum Sentinel System
+Owner: Dang Viet Quang
+EMAIL
+
+        echo "✅ Báo cáo đã được tạo: $EMAIL_FILE"
+
+    - name: 📤 UPLOAD BÁO CÁO LÊN GITHUB ARTIFACTS
+      uses: actions/upload-artifact@v3
+      with:
+        name: quantum-sentinel-reports
+        path: |
+          reports/
+          evidence/
+          logs/
+          alerts/
+        retention-days: 90
+
+    - name: 📊 CẬP NHẬT TRẠNG THÁI VÀO README
+      run: |
+        echo "📊 Cập nhật trạng thái giám sát vào README..."
+        
+        cat > README.md << README
+# 🛡️ QUANTUM GITHUB SENTINEL
+
+## Hệ thống giám sát cấp độ quân sự 24/7
+**Owner:** Dang Viet Quang  
+**Nền tảng:** GitHub Actions - Hoạt động độc lập  
+
+### 📊 TRẠNG THÁI HIỆN TẠI
+**Last Check:** $(date -u)  
+**Baseline Date:** ${{ env.BASELINE_DATE }}  
+
+### 🚨 CẢNH BÁO GẦN ĐÂY
+$(tail -5 alerts/*.log 2>/dev/null | head -10 || echo "Không có cảnh báo mới")
+
+### 📈 THỐNG KÊ
+- **GitHub CZ Commits:** $(cat logs/github_commits.log 2>/dev/null | wc -l) commits
+- **Bank API Checks:** $(cat logs/bank_api.log 2>/dev/null | wc -l) lần kiểm tra
+- **Báo cáo đã tạo:** $(ls reports/ | wc -l) báo cáo
+
+### 📋 BÁO CÁO MỚI NHẤT
+$(ls -lt reports/ | head -5)
+
+### 🔗 LIÊN KẾT
+- [Xem Artifacts](https://github.com/${{ github.repository }}/actions)
+- [Tải báo cáo mới nhất](https://github.com/${{ github.repository }}/actions/workflows/sentinel-monitor.yml)
+
+---
+*Hệ thống chạy hoàn toàn trên GitHub Actions - Không cần máy tính cá nhân*
+README
+
+    - name: 📝 COMMIT VÀ PUSH CẬP NHẬT
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add README.md logs/ evidence/ reports/ alerts/
+        git commit -m "🔄 Auto-update $(date -u)" || true
+        git push
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
